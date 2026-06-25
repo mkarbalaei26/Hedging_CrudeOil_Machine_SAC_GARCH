@@ -1,0 +1,170 @@
+
+
+project:
+  name: "CrudeOil_Hedging_CrossHedging_CL"
+  version: "1.0.0"
+  timezone: "Europe/Berlin"
+  seed_global: 2026
+  notes:
+    - "All stochastic components must derive seeds deterministically from seed_global (reproducibility)."
+    - "Exposures are treated as separate universes (WTI/Brent/OPEC); each analysis uses its own valid date window."
+
+assets:
+  exposures:
+    - id: "WTI_SPOT"
+      label: "WTI Spot"
+      frequency: "daily"
+      price_column: "WTI"
+    - id: "BRENT_SPOT"
+      label: "Brent Spot"
+      frequency: "daily"
+      price_column: "Brent"
+    - id: "OPEC_BASKET"
+      label: "OPEC Basket"
+      frequency: "daily_or_available"
+      price_column: "OPEC"
+  hedge_instrument:
+    id: "CL_FRONT_MONTH"
+    label: "NYMEX/CME WTI Light Sweet Crude Oil Futures (CL) - front month (1M)"
+    price_column_front: "CL1"
+    price_column_next: "CL2"
+    contract_size_bbl: 1000
+    tick_size_usd_per_bbl: 0.01
+    tick_value_usd_per_contract: 10
+
+# -----------------------------
+# Data I/O
+# -----------------------------
+data:
+  paths:
+    master_csv: "MasterData.csv"
+  date_column: "Date"
+  alignment:
+    sort_ascending: true
+    deduplicate_dates: true
+    # Calendar policy: master file may already be a daily calendar. We do not fabricate future data.
+    target_calendar: "as_in_master"
+
+  # -----------------------------
+  # Missing / zero / negative policies (LOCKED)
+  # -----------------------------
+  missing_data_policy:
+    # Global default for exogenous features (low-frequency indices)
+    exogenous_lowfreq_to_daily: "forward_fill"
+    # Cap forward-fill length by native frequency to avoid absurdly long flat segments
+    max_ffill_days_by_native_freq:
+      daily: 5
+      weekly: 7
+      monthly: 35
+      quarterly: 110
+    forbidden:
+      - "backfill"
+      - "two_sided_smoothing_using_future"
+
+    # Core price series policy (prices/levels)
+    # Note: universe-specific windowing will be applied later; here we only define fill behavior.
+    prices_core_series:
+      WTI: "forward_fill"      # gaps from holidays/weekends are expected
+      Brent: "forward_fill"
+      OPEC: "forward_fill_within_universe_only"  # do NOT force OPEC to match earlier universes
+      CL1: "forward_fill"
+      CL2: "forward_fill"
+
+  zero_price_policy:
+    # LOCKED: zero prices are treated as invalid observations
+    action: "drop_rows_where_any_core_price_is_zero"
+    columns:
+      - "WTI"
+      - "Brent"
+      - "OPEC"
+      - "CL1"
+      - "CL2"
+
+  negative_price_policy:
+    # LOCKED: keep negative prices (thesis topic)
+    action: "keep"
+    notes:
+      - "Negative prices are preserved (e.g., 2020-04-20) and must not be winsorized away."
+
+  # -----------------------------
+  # Tradable day definition (LOCKED for simulation + daily adjustment)
+  # -----------------------------
+  tradable_day:
+    # A day is tradable if a NEW settlement is observed (change vs previous day), not merely non-NA.
+    definition: "settlement_update"
+    primary_settlement_column: "CL1"
+    fallback_settlement_columns:
+      - "CL2"
+    # If the master file already forward-filled prices, this rule prevents treating holidays/weekends as tradable.
+    notes:
+      - "Used to disable re-hedging/adjustment on non-settlement days in the simulator."
+
+  # -----------------------------
+  # Returns construction (LOCKED)
+  # -----------------------------
+  returns:
+    default_type: "log"
+    # Hybrid policy: if log-return is undefined due to non-positive prices, use simple return for those dates.
+    hybrid_fallback:
+      enabled: true
+      fallback_type: "simple"
+      # keep a flag column to audit where fallback happened
+      store_used_simple_flag: true
+    # Clipping / winsorize is disabled (LOCKED by prior decision)
+    clip_extremes:
+      enabled: false
+
+# -----------------------------
+# Feature usage policy (to prevent leakage)
+# -----------------------------
+features:
+  # Features may have limited availability windows (e.g., OVX). Enforce in DataAdapter.
+  availability_policy:
+    enforce_start_end_dates: true
+    if_outside_window:
+      action: "set_nan"   # do not forward-fill before first observation
+      note: "Prevents leakage via synthetic availability."
+
+  # Explicit role mapping for columns. If a column is not listed, treat as ai_feature by default.
+  # baseline: allowed in classical models; ai_feature: used only for AI models.
+  roles:
+    baseline_only:
+      - "WTI"
+      - "Brent"
+      - "OPEC"
+      - "CL1"
+    ai_feature_only:
+      - "CL2"   # used for roll/yield signals or AI context if needed
+      - "OVX"
+      - "VIX"
+      - "DXY"
+      - "DTB3"
+      - "TB3M"
+      - "GEPUCURRENT"
+      - "EPUTRADE"
+      - "SP500_ENERGY"
+      - "WTUI_global_gdpw"
+
+# -----------------------------
+# Output directories (convention)
+# -----------------------------
+outputs:
+  directories:
+    data: "data"
+    tables: "reports/tables"
+    reports: "reports"
+    scenarios: "scenarios"
+    results: "results"
+    models: "models"
+
+# -----------------------------
+# Experiment bookkeeping (recommended)
+# -----------------------------
+run_manifest:
+  enabled: true
+  template_path: "run_manifest.template.json"
+  store_hashes:
+    - "config.yaml"
+    - "MasterData.csv"
+  notes:
+    - "Run manifests freeze exact inputs/outputs for reproducibility across phases."

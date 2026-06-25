@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# macOS
+.DS_Store
+**/.DS_Store
+._cache/
+
+# IDE
+.vscode/
+
+# Backup files
+*.bak
+*.bak_*
+
+# Data duplicates
+MasterData copy.csv
+
+# Local caches (regenerable)
+rl_cache/
+
+# Generated outputs
+scenarios/
+rl_outputs/
+old report/
+sudocodes/
+reports/Brent/
+reports/WTI/
+reports/Opec/
+ecdf_overlay_OPEC_BASKET.png
+
+# Logs / misc
+*.log
+*.tmp

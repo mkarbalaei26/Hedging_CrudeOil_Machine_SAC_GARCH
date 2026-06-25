@@ -1,0 +1,249 @@
+project:
+  name: "RL-Based Crude Oil Hedging"
+  objective: >
+    Develop and evaluate PPO-based reinforcement learning hedging strategies
+    for crude oil spot exposures (WTI, Brent, OPEC Basket) using only
+    CME WTI Light Sweet Crude Oil Futures (CL front-month).
+    Compare RL against econometric benchmarks under realistic
+    rollover, transaction cost, and MTM constraints.
+
+data:
+  master_files:
+    primary: MasterData.parquet
+    fallback: MasterData.csv
+  contains:
+    - WTI, Brent, OPEC spot prices
+    - CL1, CL2 futures settlements
+    - macro/financial factors
+    - geopolitical risk indices
+
+exposures:
+  - id: WTI_SPOT
+    spot_column: WTI
+  - id: BRENT_SPOT
+    spot_column: Brent
+  - id: OPEC_BASKET
+    spot_column: OPEC
+
+futures_instrument:
+  symbol: CL
+  contract_size_bbl: 1000
+  tick_size_usd_per_bbl: 0.01
+  tick_value_usd: 10
+  contract_used: front_month_only
+
+rollover:
+  ltd_rule: >
+    Trading terminates 3 business days before the 25th calendar day
+    of the month prior to the contract month.
+  roll_date: >
+    2 business days before LTD.
+  implementation_note: >
+    Early-sample robustness: _prev_tradable truncates to earliest
+    available tradable date instead of raising errors (fix applied for Brent).
+
+cost_model:
+  half_spread_ticks: 1
+  cost_per_trade_usd: 10
+  roll_trades: 2
+  notes: >
+    Tick-based proxy cost model due to lack of bid/ask data.
+
+features:
+  role_used: ai_feature_only
+  current_features:
+    - CL2
+    - DTB3
+    - DXY
+    - EPUTRADE
+    - GEPUCURRENT
+    - OVX
+    - SP500_ENERGY
+    - VIX
+    - WTUI_global_gdpw
+  includes_geopolitical_risk: true
+
+precompute_cache:
+  files:
+    - rl_cache/precompute_WTI_SPOT.npz
+    - rl_cache/precompute_BRENT_SPOT.npz
+    - rl_cache/precompute_OPEC_BASKET.npz
+  arrays_inside:
+    - dates_int
+    - spot
+    - dS
+    - cl1
+    - cl2
+    - f_mark
+    - pnl_1c
+    - roll_flag
+    - tradable
+    - feature_matrix
+    - feature_names
+
+scenarios:
+  structure:
+    - scenarios/WTI_SPOT/
+    - scenarios/BRENT_SPOT/
+    - scenarios/OPEC_BASKET/
+  types:
+    - baseline
+    - oracle_universe
+    - oracle_all
+  schema_keys:
+    - scenario_id
+    - exposure_id
+    - start_idx
+    - end_idx
+    - start_day_int
+    - end_day_int
+    - start_date_int
+    - end_date_int
+    - volume_bbl
+  mapping:
+    description: >
+      scenario_loader maps start_date/end_date to integer indices
+      using dates_int from precompute.
+
+rl_environment:
+  class: OilHedgingDailyEnv
+  episode: one physical trade scenario (20–40 days typical)
+  action_space: continuous_delta_hedge_ratio
+  base_policy: naive
+  naive_hedge_ratio: 1.0
+  action_definition: "h_t = naive_hedge_ratio + delta_h_t"
+  delta_h_bounds: [-2.0, 2.0]
+  apply_actions_only_on_tradable_days: true
+  min_action_change_threshold: 0.02
+  reward_components:
+    - rolling_variance_penalty
+    - LPM_downside_penalty
+    - drawdown_penalty
+    - transaction_cost_penalty
+    - small_net_pnl_component
+  goal: >
+    Primary objective is risk reduction (variance and downside risk).
+    Net PnL is included with a small weight only to avoid pathological hedges.
+    Transaction costs and turnover are explicitly penalized to prevent over-trading.
+
+training:
+  algorithm: PPO (stable-baselines3)
+  walk_forward:
+    scheme: hybrid_expanding
+    train_years_initial: 2
+    validation_years: 1
+    test_years: 1
+    step: 1 year
+    expanding_max_years: 8
+    warm_start_from_previous_window: true
+  device_preference: mps
+  train_domain: oracle_universe
+  evaluation_domains:
+    - oracle_universe
+    - baseline
+    - oracle_all
+
+benchmarks:
+  - No_Hedge
+  - Naive_Hedge
+  - OLS_MinVariance
+  - Rolling_OLS
+  - CCC_GARCH
+  - DCC_GARCH
+
+evaluation_metrics:
+  risk:
+    - variance_reduction
+    - VaR
+    - ES
+    - LPM
+    - max_drawdown
+  practical:
+    - turnover
+    - transaction_cost_total
+    - roll_cost_total
+
+technical_state:
+  brent_roll_bug: fixed
+  scenario_loader_alignment: false
+  feature_set_verified: false
+  environment_ready_for_smoke_test: false
+
+next_steps:
+  - Run env smoke test (2019–2022) with and without delta_h bounds
+  - Verify scenario_loader mapping (start/end date -> start/end idx) for all exposures
+  - Precompute caches for WTI_SPOT, BRENT_SPOT, OPEC_BASKET (NumPy-first)
+  - Train first controlled window on BRENT_SPOT (hybrid expanding)
+  - Evaluate on oracle_universe, baseline, oracle_all and export unified parquet
+  - Expand to full walk-forward for all three exposures
+
+
+
+
+  # ============================================================
+# SAC Configuration (add to existing configs_RL.yml)
+# ============================================================
+
+# SAC hyperparameters
+sac_params:
+  learning_rate: 3.0e-4
+  gamma: 0.99
+  tau: 0.005
+  buffer_size: 1000000
+  batch_size: 256
+  ent_coef: 'auto'  # Automatic entropy tuning
+  train_freq: 1
+  gradient_steps: 1
+  learning_starts: 10000
+  net_arch: [256, 256]  # Actor and critic network architecture
+  total_timesteps: 200000  # Per window
+  eval_freq: 10000
+  n_eval_episodes: 5
+  checkpoint_freq: 10000
+
+# Reward function v2 parameters
+reward_v2:
+  # Paper PnL signal
+  mu_paper: 1.0
+  
+  # Adaptive downside penalty
+  lambda_down: 10.0
+  downside_order: 2
+  dd_threshold: 0.3       # θ for ϕ(s_t)
+  dd_beta: 3.0
+  
+  # Cost penalty
+  eta_cost: 5.0
+  
+  # Stability penalty
+  kappa_stability: 0.5
+  
+  # Inaction penalty
+  omega_inaction: 5.0
+  alpha_inaction: 10.0
+  n_loss_max: 5
+  dd_panic_threshold: 0.2
+
+# Walk-forward windows (example)
+walkforward:
+  windows:
+    - train_start: '2018-01-01'
+      train_end: '2020-12-31'
+      val_start: '2021-01-01'
+      val_end: '2021-12-31'
+    
+    - train_start: '2018-01-01'
+      train_end: '2021-12-31'
+      val_start: '2022-01-01'
+      val_end: '2022-12-31'
+    
+    - train_start: '2018-01-01'
+      train_end: '2022-12-31'
+      val_start: '2023-01-01'
+      val_end: '2023-12-31'
+
+# Training settings
+training:
+  device: 'cuda'  # or 'cpu'
+  n_envs: 1  # Number of parallel environments
+  warm_start: true  # Use previous window's model
